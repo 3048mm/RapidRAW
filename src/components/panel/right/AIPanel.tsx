@@ -64,8 +64,6 @@ import { OPTION_SEPARATOR } from '../../ui/AppProperties';
 import { createSubMask } from '../../../utils/maskUtils';
 import Text from '../../ui/Text';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
-import { useUser, useAuth } from '@clerk/react';
-import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useEditorStore } from '../../../store/useEditorStore';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { useUIStore } from '../../../store/useUIStore';
@@ -465,7 +463,7 @@ export default function AIPanel() {
         onSelectPatchContainer(null);
       }
     };
-    if (activePatchContainerId || renamingId) setCustomEscapeHandler(() => handler);
+    if (activePatchContainerId || renamingId) setCustomEscapeHandler(handler);
     else setCustomEscapeHandler(null);
     return () => setCustomEscapeHandler(null);
   }, [
@@ -2041,7 +2039,7 @@ function SettingsPanel({
             <Text variant={TextVariants.small}>
               {isQuickErasePatch
                 ? t('editor.ai.settings.quickEraseDesc')
-                : useFastInpaint
+                : useFastInpaint || isCloud
                   ? t('editor.ai.settings.fastInpaintDesc')
                   : t('editor.ai.settings.generativeDesc')}
             </Text>

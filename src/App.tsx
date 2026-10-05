@@ -2,7 +2,7 @@ import { type PointerEvent as ReactPointerEvent, useState, useEffect, useCallbac
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ClerkProvider } from '@clerk/react';
+import { useCloudStore } from './store/useCloudStore';
 import { ToastContainer, toast, Slide } from 'react-toastify';
 import {
   DndContext,
@@ -77,8 +77,6 @@ import {
 
 import ImageProcessingManager from './components/managers/ImageProcessingManager';
 import ImageLoaderManager from './components/managers/ImageLoaderManager';
-
-const CLERK_PUBLISHABLE_KEY = 'pk_test_YnJpZWYtc2Vhc25haWwtMTIuY2xlcmsuYWNjb3VudHMuZGV2JA'; // local dev key
 
 const insertChildrenIntoTree = (node: any, targetPath: string, newChildren: any[]): any => {
   if (!node) return null;
@@ -366,7 +364,7 @@ function App() {
     handleClearSelection,
     handleLibraryImageSingleClick,
     handleImageClick,
-    handleSetColorLabel,
+    handleSetFlag,
     refreshAllFolderTrees,
     handleTogglePinFolder,
     handleCreateAlbumItem,
@@ -402,6 +400,7 @@ function App() {
   const {
     executeDelete,
     handleDeleteSelected,
+    handleDeleteRejected,
     handleCreateFolder,
     handleRenameFolder,
     handleSaveRename,
@@ -445,6 +444,7 @@ function App() {
     refreshAllFolderTrees,
     refreshImageList: handleLibraryRefresh,
     executeDelete,
+    handleDeleteRejected,
     handleTogglePinFolder,
   });
 
@@ -461,6 +461,7 @@ function App() {
     sortedImageList,
     handleBackToLibrary,
     handleDeleteSelected,
+    handleDeleteRejected,
     handleGoHome,
     handleImageSelect,
     handlePasteFiles,
@@ -1029,7 +1030,7 @@ function App() {
           handleRenameFolder={handleRenameFolder}
           handleSaveRename={handleSaveRename}
           handleStartImport={handleStartImport}
-          handleSetColorLabel={handleSetColorLabel}
+          handleSetFlag={handleSetFlag}
           handleRate={handleRate}
           executeDelete={executeDelete}
           handleSaveCollage={handleSaveCollage}
@@ -1060,13 +1061,17 @@ function App() {
   );
 }
 
-const AppWrapper = () => (
-  <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} routerPush={(to) => {}} routerReplace={(to) => {}}>
+const AppWrapper = () => {
+  useEffect(() => {
+    useCloudStore.getState().initAuth();
+  }, []);
+
+  return (
     <ContextMenuProvider>
       <App />
       <GlobalTooltip />
     </ContextMenuProvider>
-  </ClerkProvider>
-);
+  );
+};
 
 export default AppWrapper;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useReducer, useState } from 'react';
 import {
   ArrowLeft,
   Cloud,
@@ -24,7 +24,9 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import clsx from 'clsx';
-import { Show, SignIn, useUser, useAuth, useClerk } from '@clerk/react';
+import { ClerkProvider, SignIn, useClerk } from '@clerk/react';
+import { useShallow } from 'zustand/react/shallow';
+import { useCloudStore } from '../../store/useCloudStore';
 import Button from '../ui/Button';
 import ConfirmModal from '../modals/ConfirmModal';
 import Dropdown, { OptionItem } from '../ui/Dropdown';
@@ -36,6 +38,7 @@ import { useTranslation } from 'react-i18next';
 import { Invokes } from '../ui/AppProperties';
 import {
   formatKeyCode,
+  getDefaultCombo,
   KeybindDefinition,
   KEYBIND_DEFINITIONS,
   KEYBIND_SECTIONS,
@@ -168,7 +171,8 @@ const KeybindRow = ({
     return () => window.removeEventListener('keydown', handler, { capture: true });
   }, [recording, def.action, onSave, onStartRecording]);
 
-  const displayCombo = currentCombo !== undefined ? (currentCombo.length ? currentCombo : null) : def.defaultCombo;
+  const displayCombo =
+    currentCombo !== undefined ? (currentCombo.length ? currentCombo : null) : getDefaultCombo(def, osPlatform);
 
   return (
     <div className="flex justify-between items-center py-2">
@@ -304,35 +308,90 @@ const AiProviderSwitch = ({ selectedProvider, onProviderChange }: AiProviderSwit
   );
 };
 
+const signInAppearance = {
+  variables: {
+    colorBackground: 'transparent',
+    colorInput: 'transparent',
+    colorForeground: 'inherit',
+    colorInputForeground: 'inherit',
+    colorPrimaryForeground: 'inherit',
+    colorBorder: 'transparent',
+    colorShadow: 'none',
+    colorNeutral: 'inherit',
+  },
+  elements: {
+    rootBox: '',
+    cardBox: '!shadow-none !m-0 !p-0 !rounded-none',
+    card: '!bg-transparent !border-none !shadow-none !py-0 !px-1 !rounded-none',
+    header: '!hidden',
+    formFieldLabel: '!text-base !font-semibold !text-text-primary !block !mb-2',
+    formFieldAction: '!text-text-secondary hover:!text-text-primary !transition-colors !no-underline hover:!underline',
+    formFieldInput:
+      '!bg-bg-primary !border !border-border-color !text-text-primary focus:!border-accent focus:!ring-1 focus:!ring-accent !rounded-md !px-3 !py-2',
+    formButtonPrimary:
+      '!bg-accent !text-button-text hover:!bg-accent/90 !shadow-none !transition-colors !rounded-md !mt-4 !py-2',
+    footer: '!bg-transparent !p-0 !mt-4 opacity-50 hover:opacity-100 transition-opacity',
+    footerAction: '!hidden',
+    identityPreview: '!bg-bg-primary !border !border-border-color !rounded-md !mb-4',
+    identityPreviewText: '!text-text-primary !font-medium',
+    identityPreviewEditButtonIcon: '!text-text-secondary hover:!text-text-primary !transition-colors',
+  },
+};
+
+const SignInWhenReady = () => {
+  const clerk = useClerk();
+  const [, forceRender] = useReducer((n: number) => n + 1, 0);
+
+  useEffect(() => {
+    if (clerk.loaded) {
+      forceRender();
+      return;
+    }
+    const id = window.setInterval(() => {
+      if (clerk.loaded) {
+        window.clearInterval(id);
+        forceRender();
+      }
+    }, 50);
+    return () => window.clearInterval(id);
+  }, [clerk]);
+
+  return <SignIn routing="hash" fallbackRedirectUrl="/" forceRedirectUrl="/" appearance={signInAppearance} />;
+};
+
 const CloudDashboard = () => {
-  const { user } = useUser();
-  const { signOut } = useClerk();
+  const user = useCloudStore((s) => s.user);
+  const signOut = useCloudStore((s) => s.signOut);
   const { t } = useTranslation();
   const { cloudUsage, isPro } = useCloudUsage();
 
+  const quietButtonClass =
+    'bg-transparent text-text-secondary hover:text-text-primary hover:bg-surface border-none shadow-none';
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between border-b border-border-color pb-4">
-        <div className="flex items-center gap-3">
-          <div>
-            <Text variant={TextVariants.heading}>{user?.fullName || user?.primaryEmailAddress?.emailAddress}</Text>
-            <Text variant={TextVariants.small} color={isPro ? TextColors.success : TextColors.error}>
-              {isPro
-                ? t('settings.processing.ai.cloud.signedIn.active')
-                : t('settings.processing.ai.cloud.signedIn.inactive')}
-            </Text>
-          </div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <Text variant={TextVariants.heading} className="truncate">
+            {user?.fullName || user?.primaryEmailAddress?.emailAddress}
+          </Text>
+          <Text variant={TextVariants.small} color={isPro ? TextColors.success : TextColors.error}>
+            {isPro
+              ? t('settings.processing.ai.cloud.signedIn.active')
+              : t('settings.processing.ai.cloud.signedIn.inactive')}
+          </Text>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-1 shrink-0">
           <Button
             variant="ghost"
-            className="bg-transparent text-text-secondary hover:text-text-primary hover:bg-surface border-none shadow-none"
+            className={quietButtonClass}
             onClick={() => open('https://www.getrapidraw.com/dashboard')}
           >
             {t('settings.processing.ai.cloud.signedIn.manage')} <ExternalLinkIcon size={14} className="ml-1" />
           </Button>
           <Button
             variant="ghost"
+            className={quietButtonClass}
             onClick={async () => {
               await signOut();
             }}
@@ -361,12 +420,15 @@ const CloudDashboard = () => {
           </div>
         </div>
       ) : (
-        <div className="bg-red-900/10 border border-red-500/50 p-4 rounded-md text-center">
-          <Text className="mb-3">{t('settings.processing.ai.cloud.signedOut.upgradeDesc')}</Text>
-          <Button onClick={() => open('https://www.getrapidraw.com/cloud')}>
+        <Text variant={TextVariants.small}>
+          {t('settings.processing.ai.cloud.signedOut.upgradeDesc')}{' '}
+          <button
+            onClick={() => open('https://www.getrapidraw.com/cloud')}
+            className="text-accent hover:underline focus:outline-none"
+          >
             {t('settings.processing.ai.cloud.signedOut.upgradeBtn')}
-          </Button>
-        </div>
+          </button>
+        </Text>
       )}
     </div>
   );
@@ -477,7 +539,9 @@ export default function SettingsPanel({
   onSettingsChange,
   rootPaths,
 }: SettingsPanelProps) {
-  const { user: _user } = useUser();
+  const { authStatus, clerk, user, initAuth } = useCloudStore(
+    useShallow((s) => ({ authStatus: s.authStatus, clerk: s.clerk, user: s.user, initAuth: s.initAuth })),
+  );
   const { t } = useTranslation();
   const [isClearing, setIsClearing] = useState(false);
   const [clearMessage, setClearMessage] = useState('');
@@ -995,7 +1059,11 @@ export default function SettingsPanel({
     const userKb = appSettings?.keybinds || {};
     for (const def of KEYBIND_DEFINITIONS) {
       const userCombo = userKb[def.action];
-      const effective = userCombo?.length ? userCombo : userCombo === undefined ? def.defaultCombo : null;
+      const effective = userCombo?.length
+        ? userCombo
+        : userCombo === undefined
+          ? getDefaultCombo(def, osPlatform)
+          : null;
       if (!effective) continue;
       const key = effective.join('+');
       if (!map.has(key)) map.set(key, new Set());
@@ -1006,7 +1074,7 @@ export default function SettingsPanel({
       if (actions.size > 1) actions.forEach((k) => keys.add(k));
     }
     return keys;
-  }, [appSettings?.keybinds]);
+  }, [appSettings?.keybinds, osPlatform]);
 
   return (
     <>
@@ -1098,11 +1166,13 @@ export default function SettingsPanel({
                             { value: 'es', label: 'Español' },
                             { value: 'fr', label: 'Français' },
                             { value: 'it', label: 'Italiano' },
+                            { value: 'nl', label: 'Nederlands' },
                             { value: 'pl', label: 'Polski' },
                             { value: 'pt', label: 'Português' },
                             { value: 'ru', label: 'Русский' },
                             { value: 'ja', label: '日本語' },
                             { value: 'ko', label: '한국어' },
+                            { value: 'cs', label: 'Čeština' },
                             { value: 'zh-CN', label: '简体中文' },
                             { value: 'zh-TW', label: '繁體中文' },
                           ]}
@@ -2250,60 +2320,22 @@ export default function SettingsPanel({
                             </Text>
 
                             <div className="mt-8">
-                              <Show when="signed-in">
+                              {authStatus === 'ready' && user && (
                                 <div className="p-6 bg-bg-primary rounded-xl border border-border-color shadow-inner">
                                   <CloudDashboard />
                                 </div>
-                              </Show>
-                              <Show when="signed-out">
+                              )}
+
+                              {authStatus === 'ready' && !user && clerk && (
                                 <div className="w-full max-w-md">
-                                  <SignIn
-                                    routing="hash"
-                                    fallbackRedirectUrl="/"
-                                    forceRedirectUrl="/"
-                                    appearance={{
-                                      variables: {
-                                        colorBackground: 'transparent',
-                                        colorInput: 'transparent',
-                                        colorForeground: 'inherit',
-                                        colorInputForeground: 'inherit',
-                                        colorPrimaryForeground: 'inherit',
-                                        colorBorder: 'transparent',
-                                        colorShadow: 'none',
-                                        colorNeutral: 'inherit',
-                                      },
-                                      elements: {
-                                        rootBox: '',
-
-                                        cardBox: '!shadow-none !m-0 !p-0 !rounded-none',
-
-                                        card: '!bg-transparent !border-none !shadow-none !py-0 !px-1 !rounded-none',
-
-                                        header: '!hidden',
-
-                                        formFieldLabel: '!text-base !font-semibold !text-text-primary !block !mb-2',
-
-                                        formFieldAction:
-                                          '!text-text-secondary hover:!text-text-primary !transition-colors !no-underline hover:!underline',
-
-                                        formFieldInput:
-                                          '!bg-bg-primary !border !border-border-color !text-text-primary focus:!border-accent focus:!ring-1 focus:!ring-accent !rounded-md !px-3 !py-2',
-
-                                        formButtonPrimary:
-                                          '!bg-accent !text-button-text hover:!bg-accent/90 !shadow-none !transition-colors !rounded-md !mt-4 !py-2',
-
-                                        footer:
-                                          '!bg-transparent !p-0 !mt-4 opacity-50 hover:opacity-100 transition-opacity',
-                                        footerAction: '!hidden',
-
-                                        identityPreview:
-                                          '!bg-bg-primary !border !border-border-color !rounded-md !mb-4',
-                                        identityPreviewText: '!text-text-primary !font-medium',
-                                        identityPreviewEditButtonIcon:
-                                          '!text-text-secondary hover:!text-text-primary !transition-colors',
-                                      },
-                                    }}
-                                  />
+                                  <ClerkProvider
+                                    Clerk={clerk}
+                                    publishableKey={clerk.publishableKey}
+                                    routerPush={() => {}}
+                                    routerReplace={() => {}}
+                                  >
+                                    <SignInWhenReady />
+                                  </ClerkProvider>
                                   <div className="mt-6">
                                     <Text variant={TextVariants.small}>
                                       {t('settings.processing.ai.cloud.signedOut.noAccount')}{' '}
@@ -2316,7 +2348,13 @@ export default function SettingsPanel({
                                     </Text>
                                   </div>
                                 </div>
-                              </Show>
+                              )}
+
+                              {(authStatus === 'idle' || authStatus === 'loading') && (
+                                <Text variant={TextVariants.small}>Connecting…</Text>
+                              )}
+
+                              {authStatus === 'unavailable' && <Button onClick={initAuth}>Retry connection</Button>}
                             </div>
                           </motion.div>
                         )}
