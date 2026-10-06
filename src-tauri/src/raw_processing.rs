@@ -6,11 +6,13 @@ use rawler::{
     decoders::{Decoder, Orientation, RawDecodeParams},
     imgop::{
         develop::{DemosaicAlgorithm, Intermediate, ProcessingStep, RawDevelop},
-        xyz::Illuminant,
+        matrix::{multiply, normalize, pseudo_inverse},
+        xyz::{Illuminant, SRGB_TO_XYZ_D65},
     },
     rawimage::{RawImage, RawPhotometricInterpretation},
     rawsource::RawSource,
 };
+use rayon::prelude::*;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -131,6 +133,85 @@ fn recover_clipped_pixel(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (cur_r, cur_g, cur_b)
 }
 
+fn camera_to_srgb_matrix(raw_image: &RawImage) -> Option<[[f32; 3]; 3]> {
+    let (_, color_matrix) = raw_image
+        .color_matrix
+        .iter()
+        .find(|(illuminant, _)| **illuminant == Illuminant::D65)
+        .or_else(|| raw_image.color_matrix.iter().next())?;
+    if color_matrix.len() != 9 {
+        return None;
+    }
+    let mut xyz2cam = [[0.0f32; 3]; 3];
+    for (i, row) in xyz2cam.iter_mut().enumerate() {
+        row.copy_from_slice(&color_matrix[i * 3..i * 3 + 3]);
+    }
+    let rgb2cam = normalize(multiply(&xyz2cam, &SRGB_TO_XYZ_D65));
+    Some(pseudo_inverse(rgb2cam))
+}
+
+fn reconstruct_and_calibrate(
+    pixels: &mut [[f32; 3]],
+    wb: [f32; 3],
+    cam2rgb: [[f32; 3]; 3],
+    rescale_factor: f32,
+) {
+    let clip_level = pixels
+        .par_iter()
+        .map(|p| p[0].max(p[1]).max(p[2]) * rescale_factor)
+        .reduce(|| 0.0, f32::max);
+
+    pixels.par_iter_mut().for_each(|p| {
+        for c in 0..3 {
+            p[c] *= wb[c];
+        }
+    });
+
+    if clip_level >= 0.99 {
+        let limit = |c: usize| clip_level * wb[c] / rescale_factor;
+
+        for c in 0..3 {
+            let (o1, o2) = ((c + 1) % 3, (c + 2) % 3);
+            let (lim, lim1, lim2) = (limit(c), limit(o1), limit(o2));
+
+            let mut ratios: Vec<f32> = pixels
+                .par_iter()
+                .filter_map(|p| {
+                    let opposed = 0.5 * (p[o1] + p[o2]);
+                    (p[c] >= 0.85 * lim
+                        && p[c] < 0.98 * lim
+                        && p[o1] < 0.98 * lim1
+                        && p[o2] < 0.98 * lim2
+                        && opposed > 0.01 * lim)
+                        .then_some(p[c] / opposed)
+                })
+                .collect();
+
+            if ratios.len() < 100 {
+                continue;
+            }
+            let mid = ratios.len() / 2;
+            let (_, ratio, _) = ratios.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+            let ratio = *ratio;
+
+            pixels.par_iter_mut().for_each(|p| {
+                if p[c] >= 0.98 * lim && p[o1] < 0.98 * lim1 && p[o2] < 0.98 * lim2 {
+                    let estimate = 0.5 * (p[o1] + p[o2]) * ratio;
+                    let weight = ((p[c] / lim - 0.98) / 0.02).clamp(0.0, 1.0);
+                    p[c] += (estimate - p[c]).max(0.0) * weight;
+                }
+            });
+        }
+    }
+
+    pixels.par_iter_mut().for_each(|p| {
+        let cam = *p;
+        for (out, row) in p.iter_mut().zip(cam2rgb.iter()) {
+            *out = row[0] * cam[0] + row[1] * cam[1] + row[2] * cam[2];
+        }
+    });
+}
+
 fn develop_internal(
     file_bytes: &[u8],
     fast_demosaic: bool,
@@ -201,6 +282,32 @@ fn develop_internal(
     raw_image.wb_coeffs =
         crate::multi_exposure::neutralize_wb_if_multiexposure(raw_image.wb_coeffs, file_bytes);
 
+    let is_rgb_cfa = matches!(
+        &raw_image.photometric,
+        RawPhotometricInterpretation::Cfa(config) if config.cfa.is_rgb()
+    );
+    let reconstruction = if !is_linear_format && !fast_demosaic && is_rgb_cfa {
+        camera_to_srgb_matrix(&raw_image).map(|cam2rgb| {
+            let wb = if raw_image.wb_coeffs[0].is_nan() {
+                [1.0, 1.0, 1.0]
+            } else {
+                [
+                    raw_image.wb_coeffs[0],
+                    raw_image.wb_coeffs[1],
+                    raw_image.wb_coeffs[2],
+                ]
+            };
+            (wb, cam2rgb)
+        })
+    } else {
+        None
+    };
+    if reconstruction.is_some() {
+        developer
+            .steps
+            .retain(|&step| step != ProcessingStep::Calibrate);
+    }
+
     check_cancel()?;
     let mut developed_intermediate = developer.develop_intermediate(&raw_image)?;
 
@@ -208,6 +315,12 @@ fn develop_internal(
 
     let denominator = (original_white_level - original_black_level).max(1.0);
     let rescale_factor = (u32::MAX as f32 - original_black_level) / denominator;
+
+    if let (Some((wb, cam2rgb)), Intermediate::ThreeColor(pixels)) =
+        (reconstruction, &mut developed_intermediate)
+    {
+        reconstruct_and_calibrate(&mut pixels.data, wb, cam2rgb, rescale_factor);
+    }
 
     let safe_highlight_compression = 1000.0;
 
